@@ -26,7 +26,7 @@ function Header() {
           </button>
         )}
         <Link to="/" className="text-lg font-semibold tracking-wide">
-          League Event Counts
+          League Event Count
         </Link>
         <Link
           to="/live"
