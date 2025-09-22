@@ -1,13 +1,11 @@
-// /api/oddsapi/index.js
 function redact(u) {
   return String(u).replace(/([?&]apiKey=)[^&#]+/gi, "$1***");
 }
 
 export default async function handler(req, res) {
   try {
-    const { path = "" } = req.query; // fx "v3/leagues"
-    if (!path)
-      return res.status(400).json({ error: "Missing ?path=v3/... query" });
+    const { path = "" } = req.query; // fx v3/leagues
+    if (!path) return res.status(400).json({ error: "Missing ?path=v3/..." });
 
     const u = new URL(`https://api.odds-api.io/${path}`);
     for (const [k, v] of Object.entries(req.query)) {
@@ -28,14 +26,11 @@ export default async function handler(req, res) {
     });
     const body = await r.text();
 
-    // simple logging (uden at lække nøglen)
     console.log("[oddsapi/index] upstream", r.status, redact(u.toString()));
-
     res.setHeader("Content-Type", "application/json; charset=utf-8");
     res.setHeader("Cache-Control", "no-store");
     res.status(r.status).send(body);
   } catch (e) {
-    console.error("[oddsapi/index] error", e?.message || e);
     res
       .status(502)
       .json({ error: "Upstream proxy error", detail: String(e?.message || e) });
