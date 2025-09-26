@@ -1,77 +1,73 @@
 // src/lib/apiClient.js
-const IS_PROD = !!import.meta.env.PROD;
+const IS_LOCAL =
+  typeof window !== "undefined" &&
+  /^(localhost|127\.0\.0\.1)/.test(window.location.hostname);
 
-// PROD => Vercel serverless. DEV => Vite-proxy (/oddsapi) eller Vercel dev (/api/oddsapi) hvis du sætter VITE_USE_VERCEL_DEV=1
-export const API_BASE = IS_PROD
-  ? "/api/oddsapi"
-  : import.meta.env.VITE_USE_VERCEL_DEV === "1"
-  ? "/api/oddsapi"
-  : "/oddsapi";
+// Lokal Vite -> /oddsapi (proxy til upstream) ELLER /api/oddsapi hvis du kører `vercel dev`
+// Prod/Preview -> ALTID /api/oddsapi
+export const API_BASE = IS_LOCAL
+  ? import.meta.env.VITE_USE_VERCEL_DEV === "1"
+    ? "/api/oddsapi"
+    : "/oddsapi"
+  : "/api/oddsapi";
 
-if (typeof window !== "undefined") {
-  console.info("[API] mode:", IS_PROD ? "prod" : "dev", "API_BASE:", API_BASE);
-}
+// Dev-nøgle læses kun lokalt
+const DEV_KEY = import.meta.env.VITE_ODDS_API_KEY || "";
 
-// Redact apiKey i alle logs
 export function redact(s) {
   return String(s || "").replace(/([?&]apiKey=)([^&#]+)/gi, "$1***");
 }
 
 export function buildUrl(path, params = {}) {
+  // Forbyd fejlagtig /oddsapi i prod
+  if (!IS_LOCAL && path.startsWith("/oddsapi/")) {
+    console.error("[API] forbids /oddsapi in prod, rewriting to /api/oddsapi");
+    path = path.replace(/^\/oddsapi\//, "/");
+  }
   const u = new URL(`${API_BASE}${path}`, window.location.origin);
+
+  // Tilføj brugerens params
   Object.entries(params).forEach(([k, v]) => {
-    if (v == null) return;
-    u.searchParams.set(k, String(v));
+    if (v != null) u.searchParams.set(k, String(v));
   });
-  return u.pathname + u.search; // ingen apiKey fra klienten!
+
+  // ⬅️ VIGTIGT: i lokal Vite (/oddsapi) vedhæfter vi dev-API-key
+  if (IS_LOCAL && API_BASE === "/oddsapi") {
+    if (!DEV_KEY) {
+      console.warn("[API] Missing VITE_ODDS_API_KEY in dev; requests will 401");
+    } else {
+      u.searchParams.set("apiKey", DEV_KEY);
+    }
+  }
+
+  return u.pathname + u.search;
 }
 
 export async function getJSON(path, params = {}) {
   const url = buildUrl(path, params);
-  console.info("[API][fetch]", redact(url));
-
   const res = await fetch(url, { cache: "no-store" });
   const text = await res.text();
   const ct = res.headers.get("content-type") || "";
 
-  console.info(
-    "[API][http]",
-    res.status,
-    "in",
-    res.headers.get("server-timing") || "n/a"
-  );
-  console.info("[API][preview]", text.slice(0, 200));
-
-  if (!res.ok) {
+  console.info("[API]", res.status, redact(url));
+  if (!res.ok)
     throw new Error(
       `HTTP ${res.status} ${redact(url)} :: ${text.slice(0, 200)}`
     );
-  }
 
-  // Beskyt mod at få index.html tilbage
   const looksHtml =
     text.trim().startsWith("<!DOCTYPE") || text.trim().startsWith("<html");
   if (
     looksHtml ||
-    (!ct.includes("application/json") &&
-      !text.trim().startsWith("{") &&
-      !text.trim().startsWith("["))
+    (!ct.includes("application/json") && !/^[\[{]/.test(text.trim()))
   ) {
     throw new Error(
-      `[API] Non-JSON response from ${redact(url)}\nPreview:\n${text.slice(
-        0,
-        300
-      )}`
+      `[API] Non-JSON from ${redact(url)} :: ${text.slice(0, 200)}`
     );
   }
-
   try {
     return JSON.parse(text);
   } catch (e) {
-    throw new Error(
-      `[API] JSON parse failed from ${redact(url)} :: ${
-        e.message
-      }\nPreview:\n${text.slice(0, 200)}`
-    );
+    throw new Error(`[API] JSON parse failed ${redact(url)} :: ${e.message}`);
   }
 }
