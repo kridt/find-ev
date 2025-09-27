@@ -1,0 +1,129 @@
+[
+  {
+    "sport": "football",
+    "country": "Denmark",
+    "name": "Superliga",
+    "slug": "denmark-superliga"
+  },
+  {
+    "sport": "football",
+    "country": "Ecuador",
+    "name": "Copa Ecuador",
+    "slug": "ecuador-copa-ecuador"
+  },
+  {
+    "sport": "football",
+    "country": "Ecuador",
+    "name": "LigaPro Primera A",
+    "slug": "ecuador-ligapro-primera-a"
+  },
+
+  {
+    "sport": "football",
+    "country": "England",
+    "name": "Premier League",
+    "slug": "england-premier-league"
+  },
+  {
+    "sport": "football",
+    "country": "Spain",
+    "name": "La Liga",
+    "slug": "spain-laliga"
+  },
+  {
+    "sport": "football",
+    "country": "Italy",
+    "name": "Serie A",
+    "slug": "italy-serie-a"
+  },
+  {
+    "sport": "football",
+    "country": "Germany",
+    "name": "Bundesliga",
+    "slug": "germany-bundesliga"
+  },
+  {
+    "sport": "football",
+    "country": "France",
+    "name": "Ligue 1",
+    "slug": "france-ligue-1"
+  },
+  {
+    "sport": "football",
+    "country": "Netherlands",
+    "name": "Eredivisie",
+    "slug": "netherlands-eredivisie"
+  },
+  {
+    "sport": "football",
+    "country": "Portugal",
+    "name": "Primeira Liga",
+    "slug": "portugal-primeira-liga"
+  },
+  {
+    "sport": "football",
+    "country": "Belgium",
+    "name": "First Division A",
+    "slug": "belgium-first-division-a"
+  },
+  {
+    "sport": "football",
+    "country": "Scotland",
+    "name": "Premiership",
+    "slug": "scotland-premiership"
+  },
+  {
+    "sport": "football",
+    "country": "Turkey",
+    "name": "Süper Lig",
+    "slug": "turkey-super-lig"
+  },
+  {
+    "sport": "football",
+    "country": "Austria",
+    "name": "Bundesliga",
+    "slug": "austria-bundesliga"
+  },
+  {
+    "sport": "football",
+    "country": "Switzerland",
+    "name": "Super League",
+    "slug": "switzerland-super-league"
+  },
+  {
+    "sport": "football",
+    "country": "Sweden",
+    "name": "Allsvenskan",
+    "slug": "sweden-allsvenskan"
+  },
+  {
+    "sport": "football",
+    "country": "Norway",
+    "name": "Eliteserien",
+    "slug": "norway-eliteserien"
+  },
+  {
+    "sport": "football",
+    "country": "Poland",
+    "name": "Ekstraklasa",
+    "slug": "poland-ekstraklasa"
+  },
+  {
+    "sport": "football",
+    "country": "Europe",
+    "name": "UEFA Champions League",
+    "slug": "uefa-champions-league"
+  },
+  {
+    "sport": "football",
+    "country": "Europe",
+    "name": "UEFA Europa League",
+    "slug": "uefa-europa-league"
+  },
+  {
+    "sport": "football",
+    "country": "Europe",
+    "name": "UEFA Europa Conference League",
+    "slug": "uefa-europa-conference-league"
+  }
+]

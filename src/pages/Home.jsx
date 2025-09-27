@@ -1,11 +1,10 @@
 // src/pages/Home.jsx
-import { useState, useEffect, useMemo } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { Link } from "react-router-dom";
-import { useLeagues } from "../hooks/useLeagues";
+import { useLocalLeagues } from "../hooks/useLocalLeagues";
 import { usePrefetchLeagueEvents } from "../hooks/usePrefetchLeagueEvents";
-import { LEAGUE_WHITELIST_NAMES } from "../constants/leagueWhitelist";
 
-/* ---------- Skeleton (med liste-pladsholdere) ---------- */
+/* ---------- Skeleton ---------- */
 function SkeletonCard() {
   return (
     <div className="rounded-2xl border border-slate-800 bg-slate-900/60 p-4 shadow-lg shadow-slate-950/40">
@@ -20,7 +19,7 @@ function SkeletonCard() {
   );
 }
 
-/* ---------- Tid & countdown helpers ---------- */
+/* ---------- Tid & helpers ---------- */
 function pickISO(ev) {
   return (
     ev?.date ??
@@ -42,8 +41,7 @@ const dkFmt = new Intl.DateTimeFormat("da-DK", {
 });
 function formatDK(iso) {
   if (!iso) return null;
-  const d = new Date(iso);
-  return dkFmt.format(d);
+  return dkFmt.format(new Date(iso));
 }
 function useNow(tickMs = 1000) {
   const [now, setNow] = useState(() => Date.now());
@@ -70,7 +68,7 @@ function humanCountdown(msDiff) {
     : `startet for ${parts.join(" ")} siden`;
 }
 
-/* ---------- Navne & ID helpers ---------- */
+/* ---------- Navne/ID helpers ---------- */
 function getHome(ev) {
   return (
     ev.home ??
@@ -92,13 +90,13 @@ function getAway(ev) {
   );
 }
 function getEventId(ev) {
-  const home = getHome(ev);
-  const away = getAway(ev);
-  const iso = pickISO(ev);
+  const home = getHome(ev),
+    away = getAway(ev),
+    iso = pickISO(ev);
   return ev.id ?? ev.event_id ?? ev.key ?? `${home}-${away}-${iso || "tbd"}`;
 }
 
-/* ---------- Farverige dark accents ---------- */
+/* ---------- Farve-accents ---------- */
 const ACCENTS = [
   {
     ring: "ring-emerald-500/20",
@@ -135,69 +133,16 @@ const ACCENTS = [
     chipBorder: "border-rose-400/30",
     chipBg: "bg-rose-400/10",
   },
-  {
-    ring: "ring-cyan-500/20",
-    border: "border-cyan-500/30",
-    text: "text-cyan-300",
-    chipBorder: "border-cyan-400/30",
-    chipBg: "bg-cyan-400/10",
-  },
-  {
-    ring: "ring-lime-500/20",
-    border: "border-lime-500/30",
-    text: "text-lime-300",
-    chipBorder: "border-lime-400/30",
-    chipBg: "bg-lime-400/10",
-  },
-  {
-    ring: "ring-orange-500/20",
-    border: "border-orange-500/30",
-    text: "text-orange-300",
-    chipBorder: "border-orange-400/30",
-    chipBg: "bg-orange-400/10",
-  },
-  {
-    ring: "ring-pink-500/20",
-    border: "border-pink-500/30",
-    text: "text-pink-300",
-    chipBorder: "border-pink-400/30",
-    chipBg: "bg-pink-400/10",
-  },
-  {
-    ring: "ring-indigo-500/20",
-    border: "border-indigo-500/30",
-    text: "text-indigo-300",
-    chipBorder: "border-indigo-400/30",
-    chipBg: "bg-indigo-400/10",
-  },
 ];
 const accentForIndex = (i) => ACCENTS[i % ACCENTS.length];
 
-/* ---------- Små inline ikoner (uden libs) ---------- */
-const IconClock = (props) => (
-  <svg viewBox="0 0 24 24" width="14" height="14" aria-hidden {...props}>
-    <path
-      fill="currentColor"
-      d="M12 2a10 10 0 1 0 .001 20.001A10 10 0 0 0 12 2Zm1 5a1 1 0 1 0-2 0v5c0 .265.105.52.293.707l3 3a1 1 0 0 0 1.414-1.414L13 11.586V7Z"
-    />
-  </svg>
-);
-const IconArrow = (props) => (
-  <svg viewBox="0 0 24 24" width="16" height="16" aria-hidden {...props}>
-    <path
-      fill="currentColor"
-      d="m8.29 6.71 4.59 4.59-4.59 4.59L9.71 17l6-6-6-6-1.42 1.41Z"
-    />
-  </svg>
-);
-
-/* ---------- UI: Countdown label ---------- */
+/* ---------- UI: Countdown ---------- */
 function KickoffInfo({ iso }) {
   const now = useNow(1000);
   if (!iso) return null;
-  const kickoffMs = Date.parse(iso);
-  if (!Number.isFinite(kickoffMs)) return null;
-  const diff = kickoffMs - now;
+  const ms = Date.parse(iso);
+  if (!Number.isFinite(ms)) return null;
+  const diff = ms - now;
   const label = humanCountdown(diff);
   const local = formatDK(iso);
   const isSoon = diff > 0 && diff <= 60 * 60 * 1000;
@@ -209,23 +154,19 @@ function KickoffInfo({ iso }) {
       : "text-slate-300";
   return (
     <div className="flex items-center gap-2 text-[11px]">
-      <span className={`inline-flex items-center gap-1 ${textClass}`}>
-        <IconClock />
-        {label}
-      </span>
+      <span className={textClass}>{label}</span>
       <span className="text-slate-500">•</span>
       <span className="text-slate-400">{local}</span>
     </div>
   );
 }
 
-/* ---------- Event række (nyt design, uden ID) ---------- */
+/* ---------- Event-række ---------- */
 function EventRow({ ev }) {
-  const home = getHome(ev);
-  const away = getAway(ev);
-  const iso = pickISO(ev);
-  const id = getEventId(ev);
-
+  const home = getHome(ev),
+    away = getAway(ev),
+    iso = pickISO(ev),
+    id = getEventId(ev);
   return (
     <li className="group/item relative rounded-xl border border-slate-800/60 bg-slate-900/30 px-3 py-2 hover:bg-slate-900/60 transition">
       <Link
@@ -241,60 +182,49 @@ function EventRow({ ev }) {
           </div>
           <KickoffInfo iso={iso} />
         </div>
-        <div className="shrink-0 text-slate-400 group-hover/item:text-slate-200 transition translate-x-0 group-hover/item:translate-x-0.5">
-          <IconArrow />
+        <div className="shrink-0 text-slate-400 group-hover/item:text-slate-200 transition">
+          ›
         </div>
       </Link>
     </li>
   );
 }
 
-/* ---------- Event-count badge ---------- */
+/* ---------- Count-badge ---------- */
 function CountBadge({ value, loading, accent }) {
-  const plural = value === 1 ? "event" : "events";
   const display = loading || value == null ? "…" : value;
+  const label = display === 1 ? "event" : "events";
   return (
     <div
       className={`inline-flex items-center gap-2 rounded-full border ${accent.chipBorder} ${accent.chipBg} px-3 py-1`}
     >
       <span className="text-base font-bold leading-none">{display}</span>
       <span className="text-[11px] uppercase tracking-wide text-slate-300">
-        {plural}
+        {label}
       </span>
     </div>
   );
 }
 
-/* ---------- Liga-kort (altid åbent) ---------- */
+/* ---------- Liga-kort (ALTID åbent) ---------- */
 function LeagueCard({ league, index, events, loading }) {
   const acc = accentForIndex(index);
-
-  useEffect(() => {
-    if (!events) return;
-    console.log(`[EVENTS for ${league.slug}]`, events);
-  }, [events, league.slug]);
-
   return (
     <div
       className={`relative overflow-hidden rounded-2xl border ${acc.border} bg-slate-950/70 p-4 shadow-lg shadow-slate-950/40 ring-1 ${acc.ring} transition`}
     >
-      {/* dekorativ gradient */}
       <div className="pointer-events-none absolute -top-16 -right-16 h-48 w-48 rounded-full bg-gradient-to-br from-white/5 to-transparent blur-2xl" />
-
-      {/* Header */}
       <div className="mb-3 flex items-center justify-between gap-4">
         <div>
           <div className={`text-base font-semibold ${acc.text}`}>
-            {league.name ?? league.league ?? "Unknown League"}
+            {league.name ?? "Unknown League"}
           </div>
           <div className="mt-0.5 text-xs text-slate-500">
-            {league.slug ?? league.league_slug ?? "-"}
+            {league.slug ?? "-"}
           </div>
         </div>
         <CountBadge value={events?.length} loading={loading} accent={acc} />
       </div>
-
-      {/* Liste */}
       {!events ? (
         <div className="text-sm text-slate-300">Henter events…</div>
       ) : events.length === 0 ? (
@@ -312,95 +242,74 @@ function LeagueCard({ league, index, events, loading }) {
   );
 }
 
-/* ---------- Forside med whitelist + PREFETCH + Show All toggle ---------- */
+/* ---------- Home ---------- */
 export default function Home() {
-  const { leagues, loading, error } = useLeagues({
+  // Alle ligaer fra lokal fil
+  const { leagues, loading, error } = useLocalLeagues();
+
+  // Prefetch events ≤3d for alle ligaer
+  const { byLeague, loading: preLoading } = usePrefetchLeagueEvents(leagues, {
     sport: "football",
-    useProxy: true,
+    status: "pending",
+    maxDays: 3,
+    concurrency: 5,
   });
 
-  // Show-all toggle (persist i localStorage)
-  const [showAll, setShowAll] = useState(() => {
+  // Toggle: skjul 0-kampe (default: fra)
+  const [hideZero, setHideZero] = useState(() => {
     try {
-      return localStorage.getItem("ev.showAllLeagues") === "1";
+      return localStorage.getItem("ev.hideZero") === "1";
     } catch {
       return false;
     }
   });
   useEffect(() => {
     try {
-      localStorage.setItem("ev.showAllLeagues", showAll ? "1" : "0");
+      localStorage.setItem("ev.hideZero", hideZero ? "1" : "0");
     } catch {}
-  }, [showAll]);
+  }, [hideZero]);
 
-  // Filtrer + sortér i whitelist-rækkefølge
-  const filteredLeagues = useMemo(() => {
-    const norm = (s) =>
-      String(s || "")
-        .trim()
-        .toLowerCase();
-    const order = new Map(LEAGUE_WHITELIST_NAMES.map((n, i) => [norm(n), i]));
-    const allow = new Set(order.keys());
-    const arr = (leagues || []).filter((l) =>
-      allow.has(norm(l.name ?? l.league))
-    );
-    arr.sort(
-      (a, b) =>
-        (order.get(norm(a.name ?? a.league)) ?? 9999) -
-        (order.get(norm(b.name ?? b.league)) ?? 9999)
-    );
-    return arr;
-  }, [leagues]);
-
-  // Prefetch alle events (≤ 3 dage) for whitelisten
-  const { byLeague, loading: preLoading } = usePrefetchLeagueEvents(
-    filteredLeagues,
-    {
-      sport: "football",
-      status: "pending",
-      maxDays: 3,
-      useProxy: true,
-      concurrency: 5,
-    }
+  const sortedLeagues = useMemo(
+    () =>
+      [...(leagues || [])].sort((a, b) => a.name.localeCompare(b.name, "en")),
+    [leagues]
   );
 
-  // Skjul ligaer med 0 events (med mindre “Show all” er slået til)
   const leaguesToRender = useMemo(() => {
-    if (showAll) return filteredLeagues;
-    return filteredLeagues.filter((l) => {
+    if (!hideZero) return sortedLeagues;
+    return sortedLeagues.filter((l) => {
       const arr = byLeague[l.slug];
       if (arr == null) return true; // vis mens den loader
       return arr.length > 0;
     });
-  }, [filteredLeagues, byLeague, showAll]);
+  }, [sortedLeagues, byLeague, hideZero]);
 
   const hiddenCount = useMemo(() => {
-    if (showAll) return 0;
+    if (!hideZero) return 0;
     let c = 0;
-    for (const l of filteredLeagues) {
+    for (const l of sortedLeagues) {
       const arr = byLeague[l.slug];
       if (Array.isArray(arr) && arr.length === 0) c++;
     }
     return c;
-  }, [filteredLeagues, byLeague, showAll]);
+  }, [sortedLeagues, byLeague, hideZero]);
 
   return (
     <div className="space-y-6">
       <div className="flex items-center gap-3">
         <p className="opacity-80">
-          Viser whitelisted ligaer.{" "}
-          <span className="opacity-90">Alle kampe ≤ 3 dage</span>, DK-tid & live
-          countdown. Næste kamp øverst.
+          Viser <b>alle ligaer</b> fra lokal fil. Events ≤ 3 dage, DK-tid & live
+          countdown.
         </p>
-        <div className="ml-auto flex items-center gap-2">
+        <div className="ml-auto flex items-center gap-3">
           <label className="flex items-center gap-2 text-sm">
             <input
               type="checkbox"
-              checked={showAll}
-              onChange={(e) => setShowAll(e.target.checked)}
+              checked={hideZero}
+              onChange={(e) => setHideZero(e.target.checked)}
               className="h-4 w-4 accent-emerald-500"
             />
-            <span>Show all leagues</span>
+            <span>Hide leagues with 0 events</span>
           </label>
           <Link
             to="/live"
@@ -411,7 +320,7 @@ export default function Home() {
         </div>
       </div>
 
-      {!showAll && hiddenCount > 0 && (
+      {hiddenCount > 0 && hideZero && (
         <div className="text-xs opacity-70">
           Skjuler{" "}
           <span className="text-emerald-300 font-medium">{hiddenCount}</span>{" "}
@@ -439,8 +348,8 @@ export default function Home() {
               key={l.slug ?? l.name ?? i}
               league={l}
               index={i}
-              events={byLeague[l.slug]} // hentet & filtreret & sorteret
-              loading={preLoading && !byLeague[l.slug]} // viser "…" i badge mens netop den liga loader
+              events={byLeague[l.slug]}
+              loading={preLoading && !byLeague[l.slug]}
             />
           ))}
         </div>
