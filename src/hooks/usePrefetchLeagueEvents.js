@@ -1,4 +1,3 @@
-// src/hooks/usePrefetchLeagueEvents.js
 import { useEffect, useMemo, useState } from "react";
 import { buildUrl, redact } from "../lib/apiClient";
 
@@ -21,26 +20,38 @@ function toMs(ev) {
 function delay(ms) {
   return new Promise((r) => setTimeout(r, ms));
 }
+const IS_VERBOSE = () => {
+  try {
+    return localStorage.getItem("ev.debug") === "1";
+  } catch {
+    return true;
+  }
+};
 
-/** Kører chunks sekventielt med pause imellem for at undgå 429 */
-async function runWithRateLimit(items, chunkSize, gapMs, worker) {
-  const results = [];
-  for (let i = 0; i < items.length; i += chunkSize) {
-    const chunk = items.slice(i, i + chunkSize);
-    const settled = await Promise.allSettled(chunk.map(worker));
-    results.push(...settled);
-    // lille jitter mellem batches (ikke efter sidste)
-    if (i + chunkSize < items.length) {
+/** Batch-kørsel med lille pause for at undgå rate limits */
+async function runBatches(items, size, gapMs, worker) {
+  const out = [];
+  for (let i = 0; i < items.length; i += size) {
+    const chunk = items.slice(i, i + size);
+    const part = await Promise.allSettled(chunk.map(worker));
+    out.push(...part);
+    if (i + size < items.length) {
       const jitter = Math.floor(Math.random() * 200);
       await delay(gapMs + jitter);
     }
   }
-  return results;
+  return out;
 }
 
-/** Robust JSON fetch der returnerer både headers, status, text og parsed json (hvis muligt) */
-async function fetchJsonWithPreview(url) {
-  const res = await fetch(url, { cache: "no-store" });
+/** Robust fetch: returnér headers + text + parsed json (hvis muligt) */
+async function fetchJsonWithPreview(url, extraHeaders = {}) {
+  const res = await fetch(url, {
+    cache: "no-store",
+    headers: {
+      "x-ev-client": "prefetch",
+      ...extraHeaders,
+    },
+  });
   const text = await res.text();
   const headers = {
     "content-type": res.headers.get("content-type") || "",
@@ -69,7 +80,6 @@ export function usePrefetchLeagueEvents(
     sport = "football",
     status = "pending",
     maxDays = 3,
-    // konservativ i prod for at undgå rate limits
     concurrency = import.meta.env.PROD ? 3 : 5,
     gapMs = import.meta.env.PROD ? 350 : 150,
   } = {}
@@ -99,13 +109,14 @@ export function usePrefetchLeagueEvents(
       const horizon = now + maxDays * 24 * 60 * 60 * 1000;
 
       const startedAll = Date.now();
-      console.groupCollapsed(
-        `%c[PF] Prefetch ${list.length} leagues (≤${maxDays}d)`,
-        "color:#6ee7b7"
-      );
+      IS_VERBOSE() &&
+        console.groupCollapsed(
+          `%c[PF] Start prefetch: ${list.length} leagues (≤${maxDays} dage)`,
+          "color:#6ee7b7"
+        );
 
       try {
-        const results = await runWithRateLimit(
+        const results = await runBatches(
           list,
           concurrency,
           gapMs,
@@ -115,13 +126,20 @@ export function usePrefetchLeagueEvents(
               league: lg.slug,
               status,
             });
-            const started = Date.now();
-            const r = await fetchJsonWithPreview(url);
 
-            // Verbose logs per liga (sikre – ingen apiKey i URL fra client)
-            console.groupCollapsed(
-              `[PF][${lg.slug}] HTTP ${r.status} in ${Date.now() - started}ms`
-            );
+            const started = Date.now();
+            const r = await fetchJsonWithPreview(url, {
+              "x-ev-league": lg.slug,
+            });
+
+            const groupLabel = `[PF][${lg.slug}] HTTP ${r.status} in ${
+              Date.now() - started
+            }ms`;
+            IS_VERBOSE()
+              ? console.group(groupLabel)
+              : console.groupCollapsed(groupLabel);
+
+            // Overordnede response-logs
             console.log("URL:", redact(url));
             if (r.headers["x-proxy-upstream"])
               console.log("X-Proxy-Upstream:", r.headers["x-proxy-upstream"]);
@@ -132,48 +150,102 @@ export function usePrefetchLeagueEvents(
                 "X-RateLimit-Remaining:",
                 r.headers["x-ratelimit-remaining"]
               );
-            console.log("CT:", r.headers["content-type"]);
-            console.log(
-              "Body preview:",
-              (r.text || "").slice(0, 300).replace(/\s+/g, " ").trim()
-            );
+            console.log("Content-Type:", r.headers["content-type"]);
 
+            // Ikke-OK? → fejl
             if (!r.ok) {
               console.warn(
-                `[PF][${lg.slug}] non-OK, treating as error (will not show as 0).`
+                `[PF][${lg.slug}] Non-OK (behandles som fejl, IKKE som 0 kampe).`
               );
+              console.log("Body preview:", (r.text || "").slice(0, 400));
               console.groupEnd();
               return { slug: lg.slug, error: `HTTP ${r.status}` };
             }
 
-            // fleksibel form: {events: []} eller [] på toppen
+            // JSON form & nøgler
+            const keys =
+              r.json && typeof r.json === "object" ? Object.keys(r.json) : [];
+            console.log("Top-level keys:", keys);
             const arrRaw = Array.isArray(r.json?.events)
               ? r.json.events
               : Array.isArray(r.json)
               ? r.json
+              : Array.isArray(r.json?.data)
+              ? r.json.data
               : [];
 
-            console.log("events raw:", arrRaw.length);
+            console.log("events raw count:", arrRaw.length);
+            if (arrRaw.length > 0) {
+              const sample = arrRaw.slice(0, 3).map((ev, i) => ({
+                i: i + 1,
+                id: ev.id ?? ev.event_id ?? ev.key ?? "n/a",
+                date: pickISO(ev),
+                home:
+                  ev.home ??
+                  ev.home_team ??
+                  ev.teams?.home ??
+                  ev.participants?.[0]?.name,
+                away:
+                  ev.away ??
+                  ev.away_team ??
+                  ev.teams?.away ??
+                  ev.participants?.[1]?.name,
+              }));
+              console.table(sample);
+            } else {
+              console.log(
+                "Body preview (0 raw):",
+                (r.text || "").slice(0, 400)
+              );
+            }
 
+            // Filtrér ≤3 dage og log årsager for bortfiltrering
+            const reasons = {
+              invalidDate: 0,
+              past: 0,
+              beyondHorizon: 0,
+              kept: 0,
+            };
             const filtered = arrRaw
               .filter((ev) => {
                 const ms = toMs(ev);
-                return Number.isFinite(ms) && ms >= now && ms <= horizon;
+                if (!Number.isFinite(ms)) {
+                  reasons.invalidDate++;
+                  return false;
+                }
+                if (ms < now) {
+                  reasons.past++;
+                  return false;
+                }
+                if (ms > horizon) {
+                  reasons.beyondHorizon++;
+                  return false;
+                }
+                reasons.kept++;
+                return true;
               })
               .sort((a, b) => toMs(a) - toMs(b));
 
-            console.log("events filtered (≤horizon):", filtered.length);
-            // log de første 3
-            filtered.slice(0, 3).forEach((ev, i) =>
-              console.log(`#${i + 1}`, {
-                id: ev.id ?? ev.event_id ?? "n/a",
-                date: pickISO(ev),
-                home: ev.home ?? ev.home_team ?? ev.teams?.home,
-                away: ev.away ?? ev.away_team ?? ev.teams?.away,
-              })
-            );
-            console.groupEnd();
+            console.log("filter reasons:", reasons);
+            if (filtered.length > 0) {
+              const first = filtered[0];
+              console.log("first kept:", {
+                id: first.id ?? first.event_id ?? first.key ?? "n/a",
+                date: pickISO(first),
+                home:
+                  first.home ??
+                  first.home_team ??
+                  first.teams?.home ??
+                  first.participants?.[0]?.name,
+                away:
+                  first.away ??
+                  first.away_team ??
+                  first.teams?.away ??
+                  first.participants?.[1]?.name,
+              });
+            }
 
+            console.groupEnd();
             return { slug: lg.slug, events: filtered };
           }
         );
@@ -187,14 +259,12 @@ export function usePrefetchLeagueEvents(
           if (r.status === "fulfilled") {
             const val = r.value;
             if (val?.error) {
-              // markér som fejl → undefined i map (UI viser “henter…” i stedet for 0)
-              map[slug] = undefined;
+              map[slug] = undefined; // fejl → behold som "ukendt" i UI
             } else {
               map[slug] = val?.events ?? [];
             }
           } else {
-            // promise fejlede
-            map[slug] = undefined;
+            map[slug] = undefined; // promise-reject
           }
         }
 
@@ -204,10 +274,13 @@ export function usePrefetchLeagueEvents(
       } finally {
         if (!cancelled) {
           setLoading(false);
-          console.log(
-            `[PF] done in ${Date.now() - startedAll}ms. Leagues: ${list.length}`
-          );
-          console.groupEnd();
+          IS_VERBOSE() &&
+            console.log(
+              `[PF] done in ${Date.now() - startedAll}ms. Leagues: ${
+                list.length
+              }`
+            );
+          IS_VERBOSE() && console.groupEnd();
         }
       }
     }
