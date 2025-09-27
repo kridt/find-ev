@@ -3,7 +3,7 @@ import { useEffect, useMemo, useState } from "react";
 import { useLocation, useParams, Link } from "react-router-dom";
 import { getJSON } from "../lib/apiClient";
 
-/** ----------- Indstillinger ----------- */
+/** ---------- Indstillinger ---------- */
 const BOOKMAKERS = [
   "Bet365",
   "Betinia DK",
@@ -16,8 +16,9 @@ const BOOKMAKERS = [
   "NordicBet",
   "Unibet DK",
 ];
-const MIN_PROVIDERS = 3; // min. antal bookmakere for at en selection tæller
-const EV_THRESHOLD = 4; // EV%-tærskel til filter + “over gennemsnit”-chips
+
+const MIN_PROVIDERS = 3; // min. antal bookmakere for EV-beregning (core: filtrerer; props: kun EV)
+const EV_THRESHOLD = 4; // % til filter og "over gennemsnit"-chips
 
 const DK = new Intl.DateTimeFormat("da-DK", {
   timeZone: "Europe/Copenhagen",
@@ -28,18 +29,54 @@ const DK = new Intl.DateTimeFormat("da-DK", {
   minute: "2-digit",
 });
 
-/** ----------- Utils ----------- */
-const num = (v) => {
-  if (v == null) return NaN;
-  const n = typeof v === "number" ? v : parseFloat(String(v).replace(",", "."));
-  return Number.isFinite(n) ? n : NaN;
+/** ---------- Utils ---------- */
+const toNum = (v) => {
+  if (v == null) return null;
+  if (typeof v === "number") return Number.isFinite(v) ? v : null;
+  const s = String(v).trim();
+  if (!s || s.toUpperCase() === "N/A") return null;
+  const n = parseFloat(s.replace(",", "."));
+  return Number.isFinite(n) ? n : null;
 };
 const pct = (x) => `${x.toFixed(2)}%`;
-const fmtOdd = (x) => (x ? Number(x).toFixed(2) : "—");
+const fmtOdd = (x) => (x == null ? "—" : Number(x).toFixed(2));
 const safeArr = (a) => (Array.isArray(a) ? a : []);
 const isObj = (o) => o && typeof o === "object";
 
-/** Byg labels for selections */
+const isNumericId = (v) => v != null && /^\d+$/.test(String(v));
+const pickNumeric = (...cands) => {
+  for (const c of cands) if (isNumericId(c)) return String(c);
+  return null;
+};
+
+const CORE_MARKET_HINTS = [
+  "ML",
+  "Draw No Bet",
+  "Totals",
+  "Goals Over/Under",
+  "Both Teams To Score",
+  "ML HT",
+  "Totals HT",
+  "Team Total Home",
+  "Team Total Away",
+  "Corners Totals",
+  "European Handicap",
+];
+
+const PROP_MARKET_HINTS = [
+  "Anytime Goalscorer",
+  "First Goalscorer",
+  "Last Goalscorer",
+  "Team Goalscorer",
+  "Player Cards",
+  "Multi Scorers",
+  "Player Shots",
+  "Player Assists",
+  "Player Tackles",
+  "Player Passes",
+];
+
+/** ---------- Label helpers ---------- */
 function labelFor3Way(side) {
   if (side === "home") return "Home";
   if (side === "draw") return "Draw";
@@ -49,195 +86,217 @@ function labelFor3Way(side) {
 function withHdp(base, hdp) {
   if (hdp == null || hdp === "" || isNaN(+hdp)) return base;
   const h = Number(hdp);
-  const s = h > 0 ? `+${h}` : `${h}`;
-  return `${base} (${s})`;
+  return `${base} (${h > 0 ? `+${h}` : h})`;
 }
+const looksLike = (name, list) =>
+  (name || "").toLowerCase &&
+  list.some((m) => name.toLowerCase().includes(m.toLowerCase()));
+const keyFor = (group, selection) => `${group} :: ${selection}`;
 
-/** Ekspandér alle markeder til “selection-keys” pr. bookmaker */
+/** ---------- Normalisering af markeder fra én bookmaker ---------- */
 function explodeBookieMarkets(bookie, markets) {
-  const out = []; // { key, market, selection, hdp, price, bookie }
+  const out = []; // { key, group, selection, price, bookie, isProp, isCore, hdp? }
   for (const m of safeArr(markets)) {
-    if (!m?.name) continue;
-    const mName = String(m.name);
-    for (const row of safeArr(m.odds)) {
-      // 1) 3-vejs (home/draw/away)
-      for (const side of ["home", "draw", "away"]) {
-        if (row[side] != null) {
-          const price = num(row[side]);
-          if (!Number.isFinite(price)) continue;
-          const key = `${mName} :: ${withHdp(labelFor3Way(side), row.hdp)}`;
-          out.push({
-            key,
-            market: mName,
-            selection: withHdp(labelFor3Way(side), row.hdp),
-            hdp: row.hdp,
-            price,
-            bookie,
-          });
-        }
-      }
-      // 2) over/under
-      if (row.over != null || row.under != null) {
-        if (row.over != null) {
-          const p = num(row.over);
-          if (Number.isFinite(p)) {
-            const key = `${mName} :: Over ${row.hdp}`;
-            out.push({
-              key,
-              market: mName,
-              selection: `Over ${row.hdp}`,
-              hdp: row.hdp,
-              price: p,
-              bookie,
-            });
-          }
-        }
-        if (row.under != null) {
-          const p = num(row.under);
-          if (Number.isFinite(p)) {
-            const key = `${mName} :: Under ${row.hdp}`;
-            out.push({
-              key,
-              market: mName,
-              selection: `Under ${row.hdp}`,
-              hdp: row.hdp,
-              price: p,
-              bookie,
-            });
-          }
-        }
-      }
-      // 3) BTTS (yes/no)
-      if (
-        row.yes != null ||
-        row.no != null ||
-        (row.hdp === 0 && (row.yes != null || row.no != null))
-      ) {
-        if (row.yes != null) {
-          const p = num(row.yes);
-          if (Number.isFinite(p)) {
-            const key = `${mName} :: Yes`;
-            out.push({
-              key,
-              market: mName,
-              selection: "Yes",
-              hdp: 0,
-              price: p,
-              bookie,
-            });
-          }
-        }
-        if (row.no != null) {
-          const p = num(row.no);
-          if (Number.isFinite(p)) {
-            const key = `${mName} :: No`;
-            out.push({
-              key,
-              market: mName,
-              selection: "No",
-              hdp: 0,
-              price: p,
-              bookie,
-            });
-          }
-        }
-      }
-      // 4) Draw No Bet (hdp=0 med home/away)
-      if (mName.toLowerCase().includes("draw no bet")) {
-        for (const side of ["home", "away"]) {
-          if (row[side] != null) {
-            const p = num(row[side]);
-            if (Number.isFinite(p)) {
-              const key = `${mName} :: ${withHdp(
-                labelFor3Way(side),
-                row.hdp ?? 0
-              )}`;
-              out.push({
-                key,
-                market: mName,
-                selection: withHdp(labelFor3Way(side), row.hdp ?? 0),
-                hdp: row.hdp ?? 0,
-                price: p,
-                bookie,
-              });
-            }
-          }
-        }
-      }
+    const name = m?.name || "";
+    const isCore = looksLike(name, CORE_MARKET_HINTS);
+    const isProp = looksLike(name, PROP_MARKET_HINTS);
+    const odds = safeArr(m?.odds);
+
+    const push = (group, selection, price, extra = {}) => {
+      const p = toNum(price);
+      if (p == null) return;
+      out.push({
+        key: keyFor(group, selection),
+        group,
+        selection,
+        price: p,
+        bookie,
+        isProp,
+        isCore,
+        ...extra,
+      });
+    };
+
+    // 1) 1X2 / ML (+ HT)
+    if (name === "ML" || name === "ML HT" || /moneyline/i.test(name)) {
+      odds.forEach((o) => {
+        push(name, "Home", o.home);
+        if (o.draw != null) push(name, "Draw", o.draw);
+        push(name, "Away", o.away);
+      });
+      continue;
     }
+
+    // 2) Draw No Bet
+    if (/draw no bet/i.test(name)) {
+      odds.forEach((o) => {
+        push(name, "Home", o.home, { hdp: o.hdp ?? 0 });
+        push(name, "Away", o.away, { hdp: o.hdp ?? 0 });
+      });
+      continue;
+    }
+
+    // 3) Totals / Goals Over/Under / Team Totals / Corners
+    if (
+      /totals/i.test(name) ||
+      /goals over\/under/i.test(name) ||
+      /team total/i.test(name) ||
+      /corners totals/i.test(name)
+    ) {
+      odds.forEach((o) => {
+        if (o.over != null)
+          push(name, `Over @ ${o.hdp}`, o.over, { hdp: o.hdp });
+        if (o.under != null)
+          push(name, `Under @ ${o.hdp}`, o.under, { hdp: o.hdp });
+      });
+      continue;
+    }
+
+    // 4) BTTS
+    if (/both teams to score/i.test(name)) {
+      odds.forEach((o) => {
+        if (o.yes != null) push(name, "Yes", o.yes, { hdp: o.hdp ?? 0 });
+        if (o.no != null) push(name, "No", o.no, { hdp: o.hdp ?? 0 });
+      });
+      continue;
+    }
+
+    // 5) Player props (label-baseret – fx Anytime Goalscorer)
+    if (isProp) {
+      odds.forEach((o) => {
+        const label = o.label || o.player || o.name || "Option";
+        const price =
+          toNum(o.over) ??
+          toNum(o.under) ??
+          toNum(o.home) ??
+          toNum(o.away) ??
+          toNum(o.yes) ??
+          toNum(o.no);
+        if (price != null) push(name, label, price, { hdp: o.hdp });
+      });
+      continue;
+    }
+
+    // 6) European Handicap (3-vejs)
+    if (/european handicap/i.test(name)) {
+      odds.forEach((o) => {
+        if (o.home != null)
+          push(name, withHdp("Home", o.hdp), o.home, { hdp: o.hdp });
+        if (o.draw != null)
+          push(name, withHdp("Draw", o.hdp), o.draw, { hdp: o.hdp });
+        if (o.away != null)
+          push(name, withHdp("Away", o.hdp), o.away, { hdp: o.hdp });
+      });
+      continue;
+    }
+
+    // 7) Fallback – læs hvad som helst numerisk
+    odds.forEach((o) => {
+      const base =
+        o.label ||
+        o.player ||
+        o.name ||
+        (o.hdp != null ? `Line ${o.hdp}` : "Option");
+      for (const k of ["over", "under", "home", "away", "draw", "yes", "no"]) {
+        if (toNum(o[k]) != null) {
+          const sel =
+            k === "over"
+              ? `${base} (Over)`
+              : k === "under"
+              ? `${base} (Under)`
+              : `${base} (${k})`;
+          push(name, sel, o[k], { hdp: o.hdp });
+        }
+      }
+    });
   }
   return out;
 }
 
-/** Saml på tværs af bookmakere → metrics pr. selection-key
- *  maxCap: 0 (ingen), 2 eller 3 — anvendes pr. bookie (vælg bedste pris ≤ cap)
- */
+/** ---------- Aggregér & beregn EV ---------- */
+// maxCap: 0 (ingen), 2, 3 – bedste pris pr. bookmaker, men kun hvis ≤ cap.
 function aggregateSelections(json, maxCap = 0) {
   const urls = isObj(json?.urls) ? json.urls : {};
   const bmMap = isObj(json?.bookmakers) ? json.bookmakers : {};
 
-  const all = [];
+  const rows = [];
   for (const [bookie, markets] of Object.entries(bmMap)) {
-    all.push(...explodeBookieMarkets(bookie, markets));
+    rows.push(...explodeBookieMarkets(bookie, markets));
   }
 
-  const map = new Map(); // key -> { market, selection, offers: [{bookie, price}] }
-  for (const row of all) {
-    if (!map.has(row.key))
-      map.set(row.key, {
-        market: row.market,
-        selection: row.selection,
+  const map = new Map(); // key -> {group, selection, isProp, isCore, offers:[{bookie, price}]}
+  for (const r of rows) {
+    if (!map.has(r.key)) {
+      map.set(r.key, {
+        key: r.key,
+        group: r.group,
+        selection: r.selection,
+        isProp: !!r.isProp,
+        isCore: !!r.isCore,
         offers: [],
       });
-    map.get(row.key).offers.push({ bookie: row.bookie, price: row.price });
+    }
+    map.get(r.key).offers.push({ bookie: r.bookie, price: r.price });
   }
 
   const out = [];
-  for (const [key, rec] of map) {
-    const offers = rec.offers;
-
-    // dedup per bookmaker: behold bedste pris ≤ cap (eller bedste pris hvis ingen cap)
+  for (const rec of map.values()) {
     const bestByBookie = new Map();
-    for (const o of offers) {
-      const allowed = maxCap > 0 ? o.price <= maxCap : true;
-      if (!allowed) continue;
+    for (const o of rec.offers) {
+      if (maxCap > 0 && !(o.price <= maxCap)) continue;
       const prev = bestByBookie.get(o.bookie);
       if (!prev || o.price > prev.price) bestByBookie.set(o.bookie, o);
     }
-
     const uniq = Array.from(bestByBookie.values());
-    if (uniq.length < MIN_PROVIDERS) continue;
+    const count = uniq.length;
 
-    const avg = uniq.reduce((s, o) => s + o.price, 0) / uniq.length;
-    let best = -Infinity;
-    for (const o of uniq) if (o.price > best) best = o.price;
-    const evPct = (best / avg - 1) * 100;
+    // CORE: kræv MIN_PROVIDERS for at vise rækken
+    // PROPS: vis ved ≥1; EV% kun når ≥MIN_PROVIDERS
+    if (!rec.isProp && count < MIN_PROVIDERS) continue;
+    if (rec.isProp && count < 1) continue;
 
-    // Bookmakere der ligger ≥ EV_THRESHOLD over gennemsnittet
-    const aboveAvg = uniq
-      .filter((o) => o.price >= avg * (1 + EV_THRESHOLD / 100))
-      .sort((a, b) => b.price - a.price)
-      .map((o) => ({
-        ...o,
-        url: urls[o.bookie] && urls[o.bookie] !== "N/A" ? urls[o.bookie] : null,
-      }));
+    const avg = count ? uniq.reduce((s, o) => s + o.price, 0) / count : null;
+    const best = count ? Math.max(...uniq.map((o) => o.price)) : null;
+    const evPct =
+      count >= MIN_PROVIDERS && avg && best ? (best / avg - 1) * 100 : null;
 
-    // Hvem har best (kan være flere)
-    const bestBookies = uniq
-      .filter((o) => Math.abs(o.price - best) < 1e-9)
-      .map((o) => ({
-        ...o,
-        url: urls[o.bookie] && urls[o.bookie] !== "N/A" ? urls[o.bookie] : null,
-      }));
+    const aboveAvg =
+      count && avg
+        ? uniq
+            .filter((o) => o.price >= avg * (1 + EV_THRESHOLD / 100))
+            .sort((a, b) => b.price - a.price)
+            .map((o) => ({
+              ...o,
+              url:
+                urls[o.bookie] && urls[o.bookie] !== "N/A"
+                  ? urls[o.bookie]
+                  : null,
+            }))
+        : [];
+
+    const bestBookies =
+      count && best != null
+        ? uniq
+            .filter((o) => Math.abs(o.price - best) < 1e-9)
+            .map((o) => ({
+              ...o,
+              url:
+                urls[o.bookie] && urls[o.bookie] !== "N/A"
+                  ? urls[o.bookie]
+                  : null,
+            }))
+        : [];
 
     out.push({
-      key,
-      market: rec.market,
+      key: rec.key,
+      market: rec.group,
       selection: rec.selection,
-      count: uniq.length,
+      isProp: rec.isProp,
+      isCore: rec.isCore,
+      count,
       avg,
       best,
-      evPct,
+      evPct, // kan være null for props<3
       bestBookies,
       aboveAvg,
       offers: uniq.sort((a, b) => b.price - a.price),
@@ -247,7 +306,7 @@ function aggregateSelections(json, maxCap = 0) {
   return out;
 }
 
-/** ----------- UI chips ----------- */
+/** ---------- UI små-komponenter ---------- */
 function Chip({ children }) {
   return (
     <span className="inline-flex items-center gap-1 rounded-full border border-emerald-400/30 bg-emerald-400/10 px-2 py-0.5 text-xs text-emerald-300">
@@ -256,15 +315,149 @@ function Chip({ children }) {
   );
 }
 
-/** ----------- Side ----------- */
-export default function EventOdds() {
-  const { id: idParam } = useParams();
-  const location = useLocation();
-  const stateEvent = location.state?.event;
+function SectionTable({ title, rows }) {
+  return (
+    <div className="mt-6">
+      <h3 className="text-lg font-semibold text-slate-100 mb-2">{title}</h3>
+      <div className="overflow-x-auto rounded-2xl border border-slate-800 shadow-lg shadow-slate-950/40">
+        <table className="min-w-full border-collapse">
+          <thead className="bg-slate-900/70">
+            <tr className="text-left text-slate-300 text-xs uppercase tracking-wide">
+              <th className="px-3 py-2">Market</th>
+              <th className="px-3 py-2">Selection</th>
+              <th className="px-3 py-2">Bookm.</th>
+              <th className="px-3 py-2">Avg</th>
+              <th className="px-3 py-2">Best</th>
+              <th className="px-3 py-2">EV%</th>
+              <th className="px-3 py-2">≥ {EV_THRESHOLD}% over avg</th>
+            </tr>
+          </thead>
+          <tbody className="divide-y divide-slate-800">
+            {rows.length === 0 ? (
+              <tr>
+                <td colSpan={7} className="px-3 py-4 text-sm text-slate-400">
+                  Ingen rækker matcher filtrene.
+                </td>
+              </tr>
+            ) : (
+              rows.map((r) => (
+                <tr key={r.key} className="hover:bg-slate-900/40">
+                  <td className="px-3 py-2 text-sm text-slate-200">
+                    {r.market}
+                  </td>
+                  <td className="px-3 py-2 text-sm">
+                    <span className="font-medium text-slate-100">
+                      {r.selection}
+                    </span>
+                  </td>
+                  <td className="px-3 py-2 text-sm text-slate-300">
+                    {r.count}
+                  </td>
+                  <td className="px-3 py-2 text-sm">
+                    <span className="text-slate-200">{fmtOdd(r.avg)}</span>
+                  </td>
+                  <td className="px-3 py-2 text-sm">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <span className="text-emerald-300 font-semibold">
+                        {fmtOdd(r.best)}
+                      </span>
+                      {r.bestBookies.map((b) =>
+                        b.url ? (
+                          <a
+                            key={b.bookie}
+                            href={b.url}
+                            target="_blank"
+                            rel="noreferrer"
+                            className="text-xs rounded border border-emerald-400/30 bg-emerald-400/10 px-2 py-0.5 hover:bg-emerald-400/20"
+                          >
+                            {b.bookie}
+                          </a>
+                        ) : (
+                          <span
+                            key={b.bookie}
+                            className="text-xs rounded border border-slate-700 bg-slate-800 px-2 py-0.5"
+                          >
+                            {b.bookie}
+                          </span>
+                        )
+                      )}
+                    </div>
+                  </td>
+                  <td className="px-3 py-2 text-sm">
+                    <span
+                      className={`${
+                        r.evPct == null
+                          ? "text-slate-400"
+                          : r.evPct >= EV_THRESHOLD
+                          ? "text-emerald-300"
+                          : "text-slate-300"
+                      } font-semibold`}
+                    >
+                      {r.evPct == null ? "—" : pct(r.evPct)}
+                    </span>
+                  </td>
+                  <td className="px-3 py-2">
+                    <div className="flex flex-wrap gap-2">
+                      {r.aboveAvg.length === 0 ? (
+                        <span className="text-xs text-slate-500">—</span>
+                      ) : (
+                        r.aboveAvg.map((b) =>
+                          b.url ? (
+                            <a
+                              key={b.bookie}
+                              href={b.url}
+                              target="_blank"
+                              rel="noreferrer"
+                            >
+                              <Chip>
+                                {b.bookie}{" "}
+                                <span className="opacity-70">
+                                  ({fmtOdd(b.price)})
+                                </span>
+                              </Chip>
+                            </a>
+                          ) : (
+                            <Chip key={b.bookie}>
+                              {b.bookie}{" "}
+                              <span className="opacity-70">
+                                ({fmtOdd(b.price)})
+                              </span>
+                            </Chip>
+                          )
+                        )
+                      )}
+                    </div>
+                  </td>
+                </tr>
+              ))
+            )}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
 
-  // Event-id: helst fra state, fallback til URL-param hvis numerisk
-  const eventId =
-    stateEvent?.id ?? (Number.isFinite(+idParam) ? +idParam : null);
+/** ---------- Side ---------- */
+export default function EventOdds() {
+  // Robust eventId-resolution (state, route, query)
+  const params = useParams();
+  const location = useLocation();
+  const stateEvent = location.state?.event || null;
+  const qEventId = new URLSearchParams(location.search).get("eventId");
+  const eventId = pickNumeric(
+    stateEvent?.id,
+    params.id,
+    params.eventId,
+    qEventId
+  );
+
+  console.group("[EventOdds] resolve eventId");
+  console.log("route params:", params);
+  console.log("query.eventId:", qEventId);
+  console.log("stateEvent.id:", stateEvent?.id);
+  console.log("chosen eventId:", eventId || "(none)");
+  console.groupEnd();
 
   const [loading, setLoading] = useState(false);
   const [err, setErr] = useState("");
@@ -311,26 +504,29 @@ export default function EventOdds() {
   }, [maxCap]);
 
   useEffect(() => {
+    let off = false;
+
     if (!eventId) {
       setErr(
-        "Mangler eventId – gå ind via forsiden eller angiv et numerisk id i URL’en."
+        "Mangler numerisk eventId. Gå ind via forsiden eller brug ?eventId=<tal> i URL’en."
       );
+      console.error("[EventOdds] No numeric eventId – aborting fetch.");
       return;
     }
-    let off = false;
 
     async function go() {
       setLoading(true);
       setErr("");
       try {
+        console.info("[EventOdds] fetching odds for eventId=", eventId);
         const json = await getJSON("/v3/odds", {
           eventId,
           bookmakers: BOOKMAKERS.join(","),
         });
-        setData(json);
+        if (!off) setData(json);
       } catch (e) {
-        setErr(String(e?.message || e));
         console.error("[EventOdds] fetch error:", e);
+        if (!off) setErr(String(e?.message || e));
       } finally {
         if (!off) setLoading(false);
       }
@@ -346,23 +542,38 @@ export default function EventOdds() {
     [data, maxCap]
   );
 
-  const rowsFiltered = useMemo(() => {
-    const base = hideLowEv
-      ? rowsAll.filter((r) => r.evPct >= EV_THRESHOLD)
-      : rowsAll;
-    if (sortByEv) {
-      return [...base].sort((a, b) => b.evPct - a.evPct);
-    } else {
-      return [...base].sort(
-        (a, b) =>
-          a.market.localeCompare(b.market, "en") ||
-          a.selection.localeCompare(b.selection, "en")
-      );
-    }
+  // EV-filter: skjul kun rækker med EV<THRESHOLD – props uden EV (null) skal BEHOLDES
+  const applyEvFilter = (list) => {
+    if (!hideLowEv) return list;
+    return list.filter((r) => r.evPct == null || r.evPct >= EV_THRESHOLD);
+  };
+
+  const rowsCore = useMemo(() => {
+    const base = rowsAll.filter((r) => r.isCore && !r.isProp);
+    const filtered = applyEvFilter(base);
+    return sortByEv
+      ? [...filtered].sort((a, b) => (b.evPct ?? -1e9) - (a.evPct ?? -1e9))
+      : [...filtered].sort(
+          (a, b) =>
+            a.market.localeCompare(b.market, "en") ||
+            a.selection.localeCompare(b.selection, "en")
+        );
+  }, [rowsAll, sortByEv, hideLowEv]);
+
+  const rowsProps = useMemo(() => {
+    const base = rowsAll.filter((r) => r.isProp);
+    const filtered = applyEvFilter(base);
+    return sortByEv
+      ? [...filtered].sort((a, b) => (b.evPct ?? -1e9) - (a.evPct ?? -1e9))
+      : [...filtered].sort(
+          (a, b) =>
+            a.market.localeCompare(b.market, "en") ||
+            a.selection.localeCompare(b.selection, "en")
+        );
   }, [rowsAll, sortByEv, hideLowEv]);
 
   return (
-    <div className="space-y-6">
+    <div className="space-y-6 p-4 md:p-6">
       {/* Header */}
       <div className="flex items-center gap-3">
         <Link
@@ -371,18 +582,20 @@ export default function EventOdds() {
         >
           ← Tilbage
         </Link>
-        <div className="text-lg font-semibold">
-          {stateEvent ? (
+        <div className="text-lg font-semibold text-slate-100">
+          {data ? (
             <>
-              {stateEvent.home ?? stateEvent.home_team ?? "Home"}{" "}
-              <span className="opacity-60">vs</span>{" "}
-              {stateEvent.away ?? stateEvent.away_team ?? "Away"}
+              {data.home ?? "Home"} <span className="opacity-60">vs</span>{" "}
+              {data.away ?? "Away"}
               <span className="ml-3 text-sm opacity-70">
-                {stateEvent.date ? DK.format(new Date(stateEvent.date)) : null}
+                {data.date ? DK.format(new Date(data.date)) : null}
+              </span>
+              <span className="ml-3 text-xs text-slate-400">
+                {data.league?.name}
               </span>
             </>
           ) : (
-            <>Event #{eventId}</>
+            <>Event {eventId ? `#${eventId}` : ""}</>
           )}
         </div>
         <div className="ml-auto flex flex-wrap items-center gap-3 text-sm">
@@ -404,9 +617,8 @@ export default function EventOdds() {
             />
             <span>Skjul EV &lt; {EV_THRESHOLD}%</span>
           </label>
-
           {/* Max odds cap */}
-          <div className="flex items-center gap-2 ml-2">
+          <div className="flex items-center gap-2">
             <span className="opacity-80">Max odds:</span>
             <div className="inline-flex overflow-hidden rounded-lg border border-slate-700">
               <button
@@ -416,7 +628,6 @@ export default function EventOdds() {
                     : "bg-slate-800/60 hover:bg-slate-700/60"
                 }`}
                 onClick={() => setMaxCap(0)}
-                title="Ingen cap"
               >
                 Ingen
               </button>
@@ -427,7 +638,6 @@ export default function EventOdds() {
                     : "bg-slate-800/60 hover:bg-slate-700/60"
                 }`}
                 onClick={() => setMaxCap(2)}
-                title="Maks. 2.00"
               >
                 ≤2.00
               </button>
@@ -438,7 +648,6 @@ export default function EventOdds() {
                     : "bg-slate-800/60 hover:bg-slate-700/60"
                 }`}
                 onClick={() => setMaxCap(3)}
-                title="Maks. 3.00"
               >
                 ≤3.00
               </button>
@@ -460,132 +669,24 @@ export default function EventOdds() {
         </div>
       )}
 
-      {/* Tabel */}
+      {/* Tabel-sektioner */}
       {!loading && !err && (
-        <div className="overflow-x-auto rounded-2xl border border-slate-800 shadow-lg shadow-slate-950/40">
-          <table className="min-w-full border-collapse">
-            <thead className="bg-slate-900/70">
-              <tr className="text-left text-slate-300 text-xs uppercase tracking-wide">
-                <th className="px-3 py-2">Market</th>
-                <th className="px-3 py-2">Selection</th>
-                <th className="px-3 py-2">Bookm.</th>
-                <th className="px-3 py-2">Avg</th>
-                <th className="px-3 py-2">Best</th>
-                <th className="px-3 py-2">EV%</th>
-                <th className="px-3 py-2">≥ {EV_THRESHOLD}% over avg</th>
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-slate-800">
-              {rowsFiltered.length === 0 ? (
-                <tr>
-                  <td colSpan={7} className="px-3 py-4 text-sm text-slate-400">
-                    Ingen rækker matcher filtrene.
-                  </td>
-                </tr>
-              ) : (
-                rowsFiltered.map((r) => (
-                  <tr key={r.key} className="hover:bg-slate-900/40">
-                    <td className="px-3 py-2 text-sm text-slate-200">
-                      {r.market}
-                    </td>
-                    <td className="px-3 py-2 text-sm">
-                      <span className="font-medium text-slate-100">
-                        {r.selection}
-                      </span>
-                    </td>
-                    <td className="px-3 py-2 text-sm text-slate-300">
-                      {r.count}
-                    </td>
-                    <td className="px-3 py-2 text-sm">
-                      <span className="text-slate-200">{fmtOdd(r.avg)}</span>
-                    </td>
-                    <td className="px-3 py-2 text-sm">
-                      <div className="flex flex-wrap items-center gap-2">
-                        <span className="text-emerald-300 font-semibold">
-                          {fmtOdd(r.best)}
-                        </span>
-                        {r.bestBookies.map((b) =>
-                          b.url ? (
-                            <a
-                              key={b.bookie}
-                              href={b.url}
-                              target="_blank"
-                              rel="noreferrer"
-                              className="text-xs rounded border border-emerald-400/30 bg-emerald-400/10 px-2 py-0.5 hover:bg-emerald-400/20"
-                            >
-                              {b.bookie}
-                            </a>
-                          ) : (
-                            <span
-                              key={b.bookie}
-                              className="text-xs rounded border border-slate-700 bg-slate-800 px-2 py-0.5"
-                            >
-                              {b.bookie}
-                            </span>
-                          )
-                        )}
-                      </div>
-                    </td>
-                    <td className="px-3 py-2 text-sm">
-                      <span
-                        className={`font-semibold ${
-                          r.evPct >= EV_THRESHOLD
-                            ? "text-emerald-300"
-                            : "text-slate-300"
-                        }`}
-                      >
-                        {pct(r.evPct)}
-                      </span>
-                    </td>
-                    <td className="px-3 py-2">
-                      <div className="flex flex-wrap gap-2">
-                        {r.aboveAvg.length === 0 ? (
-                          <span className="text-xs text-slate-500">—</span>
-                        ) : (
-                          r.aboveAvg.map((b) =>
-                            b.url ? (
-                              <a
-                                key={b.bookie}
-                                href={b.url}
-                                target="_blank"
-                                rel="noreferrer"
-                              >
-                                <Chip>
-                                  {b.bookie}{" "}
-                                  <span className="opacity-70">
-                                    ({fmtOdd(b.price)})
-                                  </span>
-                                </Chip>
-                              </a>
-                            ) : (
-                              <Chip key={b.bookie}>
-                                {b.bookie}{" "}
-                                <span className="opacity-70">
-                                  ({fmtOdd(b.price)})
-                                </span>
-                              </Chip>
-                            )
-                          )
-                        )}
-                      </div>
-                    </td>
-                  </tr>
-                ))
-              )}
-            </tbody>
-          </table>
-        </div>
+        <>
+          <SectionTable title="Core markets" rows={rowsCore} />
+          <SectionTable title="Player props & specials" rows={rowsProps} />
+        </>
       )}
 
-      {/* Lille fodnote */}
+      {/* Fodnote */}
       <div className="text-xs opacity-70 space-y-1">
         <div>
-          EV% = <code>(bedste_odds / gennemsnit_odds − 1) × 100</code>. Kun
-          selections med mindst {MIN_PROVIDERS} bookmakere tæller.
+          EV% = <code>(bedste_odds / gennemsnit_odds − 1) × 100</code>. Core
+          markets kræver mindst {MIN_PROVIDERS} bookmakere. Player props vises
+          også ved færre; EV% kun når ≥ {MIN_PROVIDERS}.
         </div>
         <div>
-          “Max odds” cap filtrerer de enkelte bookmakere før gennemsnit/EV
-          beregnes. Har en bookmaker ingen pris ≤ cap, tæller den ikke med.
+          “Max odds” cap filtrerer bookmakere før gennemsnit/EV beregnes. Har en
+          bookmaker ingen pris ≤ cap, tæller den ikke med.
         </div>
       </div>
     </div>
