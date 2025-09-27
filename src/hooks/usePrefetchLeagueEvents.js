@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { buildUrl, redact } from "../lib/apiClient";
 
-/** ===== helpers ===== */
+/* ---------- helpers ---------- */
 function pickISO(ev) {
   return (
     ev?.date ??
@@ -17,40 +17,34 @@ function toMs(ev) {
   const t = iso ? Date.parse(iso) : NaN;
   return Number.isFinite(t) ? t : NaN;
 }
+const looksHtml = (txt = "") => {
+  const t = String(txt).trim().slice(0, 50).toLowerCase();
+  return t.startsWith("<!doctype") || t.startsWith("<html");
+};
+
 function delay(ms) {
   return new Promise((r) => setTimeout(r, ms));
 }
-const IS_VERBOSE = () => {
-  try {
-    return localStorage.getItem("ev.debug") === "1";
-  } catch {
-    return true;
-  }
-};
 
-/** Batch-kørsel med lille pause for at undgå rate limits */
+/* Kør i batches (for rate limit) */
 async function runBatches(items, size, gapMs, worker) {
   const out = [];
   for (let i = 0; i < items.length; i += size) {
     const chunk = items.slice(i, i + size);
-    const part = await Promise.allSettled(chunk.map(worker));
-    out.push(...part);
+    const settled = await Promise.allSettled(chunk.map(worker));
+    out.push(...settled);
     if (i + size < items.length) {
-      const jitter = Math.floor(Math.random() * 200);
-      await delay(gapMs + jitter);
+      await delay(gapMs + Math.floor(Math.random() * 200));
     }
   }
   return out;
 }
 
-/** Robust fetch: returnér headers + text + parsed json (hvis muligt) */
-async function fetchJsonWithPreview(url, extraHeaders = {}) {
+/* Robust fetch: returnér status, headers, text, json (hvis muligt) */
+async function fetchPreview(url, extraHeaders = {}) {
   const res = await fetch(url, {
     cache: "no-store",
-    headers: {
-      "x-ev-client": "prefetch",
-      ...extraHeaders,
-    },
+    headers: { "x-ev-client": "prefetch", ...extraHeaders },
   });
   const text = await res.text();
   const headers = {
@@ -66,14 +60,28 @@ async function fetchJsonWithPreview(url, extraHeaders = {}) {
   ) {
     try {
       json = JSON.parse(text);
-    } catch {
-      json = null;
-    }
+    } catch {}
   }
   return { ok: res.ok, status: res.status, headers, text, json };
 }
 
-/** ===== main hook ===== */
+/* Parse events fra flere mulige former */
+function extractEvents(anyJson) {
+  if (!anyJson) return [];
+  if (Array.isArray(anyJson.events)) return anyJson.events;
+  if (Array.isArray(anyJson.data)) return anyJson.data;
+  if (Array.isArray(anyJson)) return anyJson;
+  if (
+    anyJson?.events &&
+    typeof anyJson.events === "object" &&
+    Array.isArray(anyJson.events.data)
+  ) {
+    return anyJson.events.data;
+  }
+  return [];
+}
+
+/* ---------- hoved-hook ---------- */
 export function usePrefetchLeagueEvents(
   leagues,
   {
@@ -101,19 +109,16 @@ export function usePrefetchLeagueEvents(
         setByLeague({});
         return;
       }
-
       setLoading(true);
       setError("");
 
       const now = Date.now();
       const horizon = now + maxDays * 24 * 60 * 60 * 1000;
 
-      const startedAll = Date.now();
-      IS_VERBOSE() &&
-        console.groupCollapsed(
-          `%c[PF] Start prefetch: ${list.length} leagues (≤${maxDays} dage)`,
-          "color:#6ee7b7"
-        );
+      console.log(
+        `%c[PF] Prefetch ${list.length} leagues (≤${maxDays}d) · conc=${concurrency} gap=${gapMs}ms`,
+        "color:#6ee7b7"
+      );
 
       try {
         const results = await runBatches(
@@ -121,92 +126,125 @@ export function usePrefetchLeagueEvents(
           concurrency,
           gapMs,
           async (lg) => {
-            const url = buildUrl("/v3/events", {
+            const baseUrl = buildUrl("/v3/events", {
               sport,
               league: lg.slug,
               status,
             });
-
             const started = Date.now();
-            const r = await fetchJsonWithPreview(url, {
-              "x-ev-league": lg.slug,
-            });
 
-            const groupLabel = `[PF][${lg.slug}] HTTP ${r.status} in ${
-              Date.now() - started
-            }ms`;
-            IS_VERBOSE()
-              ? console.group(groupLabel)
-              : console.groupCollapsed(groupLabel);
+            // 1) Primær rute: /api/oddsapi/v3/events...
+            const r1 = await fetchPreview(baseUrl, { "x-ev-league": lg.slug });
+            const ms1 = Date.now() - started;
 
-            // Overordnede response-logs
-            console.log("URL:", redact(url));
-            if (r.headers["x-proxy-upstream"])
-              console.log("X-Proxy-Upstream:", r.headers["x-proxy-upstream"]);
-            if (r.headers["x-proxy-trace"])
-              console.log("X-Proxy-Trace:", r.headers["x-proxy-trace"]);
-            if (r.headers["x-ratelimit-remaining"])
+            // Grundlog for hvert kald (ALTID – ikke i grupper)
+            console.log(
+              `[PF][${lg.slug}] HTTP ${r1.status} (${ms1}ms) CT=${
+                r1.headers["content-type"] || "n/a"
+              } RL=${r1.headers["x-ratelimit-remaining"] || "?"} URL=${redact(
+                baseUrl
+              )}`
+            );
+            if (r1.headers["x-proxy-upstream"])
               console.log(
-                "X-RateLimit-Remaining:",
-                r.headers["x-ratelimit-remaining"]
+                `[PF][${lg.slug}] Upstream: ${r1.headers["x-proxy-upstream"]}`
               );
-            console.log("Content-Type:", r.headers["content-type"]);
-
-            // Ikke-OK? → fejl
-            if (!r.ok) {
+            if (!r1.ok || looksHtml(r1.text)) {
               console.warn(
-                `[PF][${lg.slug}] Non-OK (behandles som fejl, IKKE som 0 kampe).`
+                `[PF][${lg.slug}] Non-JSON eller non-OK fra primær. Preview:`,
+                (r1.text || "").slice(0, 200)
               );
-              console.log("Body preview:", (r.text || "").slice(0, 400));
-              console.groupEnd();
-              return { slug: lg.slug, error: `HTTP ${r.status}` };
-            }
 
-            // JSON form & nøgler
-            const keys =
-              r.json && typeof r.json === "object" ? Object.keys(r.json) : [];
-            console.log("Top-level keys:", keys);
-            const arrRaw = Array.isArray(r.json?.events)
-              ? r.json.events
-              : Array.isArray(r.json)
-              ? r.json
-              : Array.isArray(r.json?.data)
-              ? r.json.data
-              : [];
+              // 2) Fallback rute: /api/oddsapi?path=v3/events&...
+              const fbUrl = buildUrl("/", {
+                path: "v3/events",
+                sport,
+                league: lg.slug,
+                status,
+              });
+              const startedFb = Date.now();
+              const r2 = await fetchPreview(fbUrl, {
+                "x-ev-league": lg.slug,
+                "x-ev-fallback": "1",
+              });
+              const ms2 = Date.now() - startedFb;
 
-            console.log("events raw count:", arrRaw.length);
-            if (arrRaw.length > 0) {
-              const sample = arrRaw.slice(0, 3).map((ev, i) => ({
-                i: i + 1,
-                id: ev.id ?? ev.event_id ?? ev.key ?? "n/a",
-                date: pickISO(ev),
-                home:
-                  ev.home ??
-                  ev.home_team ??
-                  ev.teams?.home ??
-                  ev.participants?.[0]?.name,
-                away:
-                  ev.away ??
-                  ev.away_team ??
-                  ev.teams?.away ??
-                  ev.participants?.[1]?.name,
-              }));
-              console.table(sample);
-            } else {
               console.log(
-                "Body preview (0 raw):",
-                (r.text || "").slice(0, 400)
+                `[PF][${lg.slug}] FB HTTP ${r2.status} (${ms2}ms) CT=${
+                  r2.headers["content-type"] || "n/a"
+                } URL=${redact(fbUrl)}`
               );
+              if (r2.headers["x-proxy-upstream"])
+                console.log(
+                  `[PF][${lg.slug}] FB Upstream: ${r2.headers["x-proxy-upstream"]}`
+                );
+
+              if (!r2.ok || looksHtml(r2.text)) {
+                console.error(
+                  `[PF][${lg.slug}] Fallback fejlede også. Body preview:`,
+                  (r2.text || "").slice(0, 200)
+                );
+                return {
+                  slug: lg.slug,
+                  error: `Bad response (CT=${
+                    r2.headers["content-type"] || "n/a"
+                  })`,
+                };
+              }
+
+              const arrFb = extractEvents(r2.json);
+              console.log(`[PF][${lg.slug}] raw events (FB):`, arrFb.length);
+              const reasonsFb = {
+                invalidDate: 0,
+                past: 0,
+                beyondHorizon: 0,
+                kept: 0,
+              };
+              const filteredFb = arrFb
+                .filter((ev) => {
+                  const ms = toMs(ev);
+                  if (!Number.isFinite(ms)) {
+                    reasonsFb.invalidDate++;
+                    return false;
+                  }
+                  if (ms < now) {
+                    reasonsFb.past++;
+                    return false;
+                  }
+                  if (ms > horizon) {
+                    reasonsFb.beyondHorizon++;
+                    return false;
+                  }
+                  reasonsFb.kept++;
+                  return true;
+                })
+                .sort((a, b) => toMs(a) - toMs(b));
+              console.log(
+                `[PF][${lg.slug}] filter FB:`,
+                reasonsFb,
+                "kept=",
+                filteredFb.length
+              );
+              return { slug: lg.slug, events: filteredFb };
             }
 
-            // Filtrér ≤3 dage og log årsager for bortfiltrering
+            // Primær svar OK + JSON
+            const keys =
+              r1.json && typeof r1.json === "object"
+                ? Object.keys(r1.json)
+                : [];
+            if (keys.length)
+              console.log(`[PF][${lg.slug}] top-level keys:`, keys.join(", "));
+            const arr = extractEvents(r1.json);
+
+            console.log(`[PF][${lg.slug}] raw events:`, arr.length);
             const reasons = {
               invalidDate: 0,
               past: 0,
               beyondHorizon: 0,
               kept: 0,
             };
-            const filtered = arrRaw
+            const filtered = arr
               .filter((ev) => {
                 const ms = toMs(ev);
                 if (!Number.isFinite(ms)) {
@@ -225,27 +263,31 @@ export function usePrefetchLeagueEvents(
                 return true;
               })
               .sort((a, b) => toMs(a) - toMs(b));
+            console.log(
+              `[PF][${lg.slug}] filter:`,
+              reasons,
+              "kept=",
+              filtered.length
+            );
 
-            console.log("filter reasons:", reasons);
             if (filtered.length > 0) {
-              const first = filtered[0];
-              console.log("first kept:", {
-                id: first.id ?? first.event_id ?? first.key ?? "n/a",
-                date: pickISO(first),
+              const e0 = filtered[0];
+              console.log(`[PF][${lg.slug}] first kept:`, {
+                id: e0.id ?? e0.event_id ?? e0.key ?? "n/a",
+                date: pickISO(e0),
                 home:
-                  first.home ??
-                  first.home_team ??
-                  first.teams?.home ??
-                  first.participants?.[0]?.name,
+                  e0.home ??
+                  e0.home_team ??
+                  e0.teams?.home ??
+                  e0.participants?.[0]?.name,
                 away:
-                  first.away ??
-                  first.away_team ??
-                  first.teams?.away ??
-                  first.participants?.[1]?.name,
+                  e0.away ??
+                  e0.away_team ??
+                  e0.teams?.away ??
+                  e0.participants?.[1]?.name,
               });
             }
 
-            console.groupEnd();
             return { slug: lg.slug, events: filtered };
           }
         );
@@ -258,37 +300,21 @@ export function usePrefetchLeagueEvents(
           const r = results[i];
           if (r.status === "fulfilled") {
             const val = r.value;
-            if (val?.error) {
-              map[slug] = undefined; // fejl → behold som "ukendt" i UI
-            } else {
-              map[slug] = val?.events ?? [];
-            }
+            if (val?.error) map[slug] = undefined; // ERROR → hold “ukendt” i UI
+            else map[slug] = val?.events ?? []; // OK (kan være tom liste)
           } else {
-            map[slug] = undefined; // promise-reject
+            map[slug] = undefined; // Promise reject
           }
         }
-
         setByLeague(map);
       } catch (e) {
-        if (!cancelled) setError(String(e?.message || e));
+        setError(String(e?.message || e));
       } finally {
-        if (!cancelled) {
-          setLoading(false);
-          IS_VERBOSE() &&
-            console.log(
-              `[PF] done in ${Date.now() - startedAll}ms. Leagues: ${
-                list.length
-              }`
-            );
-          IS_VERBOSE() && console.groupEnd();
-        }
+        setLoading(false);
       }
     }
 
     go();
-    return () => {
-      cancelled = true;
-    };
   }, [JSON.stringify(list), sport, status, maxDays, concurrency, gapMs]);
 
   return { byLeague, loading, error };
